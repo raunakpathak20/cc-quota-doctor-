@@ -14,7 +14,7 @@ pip install git+https://github.com/raunakpathak20/cc-quota-doctor-.git
 Or without installing:
 ```
 git clone https://github.com/raunakpathak20/cc-quota-doctor-.git
-cd cc-quota-doctor
+cd cc-quota-doctor-
 python -m cc_quota_doctor
 ```
 
@@ -23,6 +23,7 @@ python -m cc_quota_doctor
 cc-quota-doctor                         # reads ~/.claude/projects
 cc-quota-doctor --top 10                # show more projects/sessions
 cc-quota-doctor --json > usage.json     # machine-readable
+cc-quota-doctor --idle-minutes 5          # API key / usage credits (5-min cache TTL)
 cc-quota-doctor --projects-dir PATH --home PATH
 ```
 On Windows, the default `~` resolves to `%USERPROFILE%`.
@@ -32,35 +33,23 @@ On Windows, the default `~` resolves to `%USERPROFILE%`.
 - the subagent share (sidechain messages and `subagents/` transcripts)
 - first-turn ("startup") context size per project
 - CLAUDE.md files that load at startup, with size estimates
-- cache rebuilds after more than 5 minutes idle, and compactions
+- cache rebuilds after idle gaps, reported at both TTLs: over 60 min (the main-conversation TTL on a Claude subscription) and over 5 min (the TTL for API keys, usage credits, subagents and compaction). `--idle-minutes` sets which one drives the fixes (default 60)
+- mid-session model switches (each makes the next request re-read the history uncached) and compactions
 - the largest tool outputs
-- the **top 3 fixes**, ranked by the tokens involved
+- the **top 3 fixes**, ranked by API-price-weighted tokens (cache reads count 0.1x, cache writes 1.25x). This weighting is only for ranking; it is not how plan limits are calculated
 
-## Sample output (real run, anonymized)
-From one developer's history (567 transcript files, 208 sessions), with names and paths removed and numbers rounded:
-```
-== Totals ==
-  cache write      ~260,000,000  (2%)
-  cache read    ~12,500,000,000  (98%)
-  output            ~24,600,000
-  subagents                      (24% of all tokens)
-
-== Top 3 fixes ==
-  1. Average cache read per turn is ~374,000 tokens: sessions run long.
-  2. 493 cache rebuilds after >5 min idle cost ~138,000,000 cache-write tokens.
-  3. Slim CLAUDE.md (~3,000 tokens) to under 1,500 tokens.
-```
-The longest session ran 9,849 turns with 68 compactions.
+## Sample output
+The screenshot above comes from the synthetic test data in `tests/make_sample.py`. Real-run numbers: [NEW NUMBERS]
 
 ## Honest limits
 - **It does not bypass, reset or raise any limit.** It only shows where tokens go.
-- **It cannot show your plan %.** Anthropic doesn't publish how tokens (especially cache reads) count toward plan limits, so it reports raw tokens. Compare before and after a change yourself.
+- **It cannot show your plan %.** Anthropic doesn't publish how each token type counts toward plan limits. A high cache-read share is a share of raw tokens, not of your quota: cache reads are cheap per token. Compare `/usage` before and after a change yourself.
 - **The transcript format is undocumented** and may change. Unknown lines are skipped; please open an issue if numbers look off.
-- **Some numbers are estimates.** Tool-output and CLAUDE.md sizes are characters / 4. "Idle rebuild" means a cache write of more than 5k tokens after more than 5 min of inactivity.
+- **Some numbers are estimates.** Tool-output and CLAUDE.md sizes are characters / 4. "Idle rebuild" means a main-conversation cache write of more than 5k tokens after a gap longer than the threshold. The tool can't tell which TTL you were on, so it reports both.
 - Streamed responses repeat usage lines; they are de-duplicated by message id + request id.
 
 ## Privacy
-It makes no network calls. It reads files and prints to your terminal. The code is about 300 lines of standard-library Python, so you can check that.
+It makes no network calls. It reads files and prints to your terminal. The code is a few hundred lines of standard-library Python, so you can check that.
 
 ## Tests
 ```
@@ -77,3 +66,6 @@ I built this with an AI agent after noticing my own Claude Code limits draining.
 
 ## License
 MIT
+
+## References
+- Prompt caching in Claude Code (TTL per plan, model switches, /compact cost): https://code.claude.com/docs/en/prompt-caching

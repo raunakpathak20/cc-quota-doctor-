@@ -3,7 +3,15 @@ import json, os, glob
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-CACHE_TTL_MIN = 5  # default prompt-cache TTL (minutes)
+# Prompt-cache TTL (https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets):
+# Claude subscription, main conversation: 1 hour. API key / usage credits / cloud providers,
+# subagents and compaction: 5 minutes.
+DEFAULT_IDLE_MIN = 60
+SHORT_TTL_MIN = 5
+REBUILD_MIN_TOKENS = 5000
+# Relative per-token API prices vs. base input (platform.claude.com prompt-caching docs):
+# cache read 0.1x, 5-min cache write 1.25x. Used ONLY to rank fixes; plan-limit accounting is unpublished.
+W_READ, W_WRITE = 0.1, 1.25
 
 def chars_to_tokens(n):  # rough heuristic: ~4 chars/token
     return n // 4
@@ -40,6 +48,7 @@ def total(s, prefix=""):
     return s[prefix+"input"] + s[prefix+"output"] + s[prefix+"cache_write"] + s[prefix+"cache_read"]
 
 def analyze(root, since=None, until=None):
+    """Parse transcripts. Records idle gaps (minutes, cache-write tokens) per session; thresholds are applied later."""
     root = os.path.expanduser(root)
     files = glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True)
     sessions = {}
@@ -58,7 +67,8 @@ def analyze(root, since=None, until=None):
             if ts and until and ts >= until: continue
             s = sessions.setdefault(sid, {"id": sid, "project": r.get("cwd") or proj_dir, "stats": new_stats(),
                                           "first_ts": None, "last_ts": None, "first_ctx": None,
-                                          "cache_misses_idle": 0, "compactions": 0, "models": defaultdict(int)})
+                                          "gaps": [], "model_switches": 0, "switch_tokens": 0, "last_model": None,
+                                          "compactions": 0, "models": defaultdict(int)})
             if r.get("cwd"): s["project"] = r["cwd"]
             if ts:
                 s["first_ts"] = min(filter(None, [s["first_ts"], ts]))
@@ -99,10 +109,15 @@ def analyze(root, since=None, until=None):
                 s["first_ctx"] = ctx
             lk = (sid, sub)
             prev = last_ts_by_session.get(lk)
-            if prev and ts and ts - prev > timedelta(minutes=CACHE_TTL_MIN) and (u.get("cache_creation_input_tokens", 0) or 0) > 5000:
-                s["cache_misses_idle"] += 1
-                s.setdefault("idle_rewrite_tokens", 0)
-                s["idle_rewrite_tokens"] += u.get("cache_creation_input_tokens", 0)
+            cw = u.get("cache_creation_input_tokens", 0) or 0
+            if not sub and prev and ts and cw > REBUILD_MIN_TOKENS:
+                s["gaps"].append(((ts - prev).total_seconds() / 60, cw))
+            m = msg.get("model")
+            if not sub and m and not m.startswith("<"):
+                if s["last_model"] and m != s["last_model"] and cw > REBUILD_MIN_TOKENS:
+                    s["model_switches"] += 1
+                    s["switch_tokens"] += cw
+                s["last_model"] = m
             if ts: last_ts_by_session[lk] = ts
     return {"sessions": sessions, "tool_outputs": tool_outputs, "files": len(files)}
 
@@ -125,33 +140,49 @@ def project_rollup(res):
         if s["first_ctx"]: p["first_ctx"].append(s["first_ctx"])
     return projs
 
-def fixes(res, claude_mds, projs):
-    """Return candidate fixes as (impact_score, text). Impact = estimated tokens involved."""
+def idle_summary(res, minutes):
+    """Count main-conversation cache rebuilds that followed a gap longer than `minutes`."""
+    n = toks = 0
+    for s in res["sessions"].values():
+        for gap, cw in s["gaps"]:
+            if gap > minutes:
+                n += 1; toks += cw
+    return n, toks
+
+def fixes(res, claude_mds, projs, idle_minutes=DEFAULT_IDLE_MIN):
+    """Candidate fixes as (score, text). Score = API-price-weighted tokens, for RANKING ONLY.
+    Anthropic does not publish how cache reads/writes count against plan limits."""
     S = new_stats()
     for s in res["sessions"].values():
         for k, v in s["stats"].items(): S[k] += v
     grand = total(S) + total(S, "sub_") or 1
     out = []
-    big_md = [m for m in claude_mds if m["est_tokens"] > 2000]
-    for m in big_md:
-        out.append((m["est_tokens"] * max(1, S["turns"]), f"Slim {m['path']} (~{m['est_tokens']:,} tokens, re-sent every turn). Move rarely-used sections into skills or docs loaded on demand; aim for < 1,500 tokens."))
+    turns = max(1, S["turns"])
+    for m in [m for m in claude_mds if m["est_tokens"] > 1500]:
+        out.append((m["est_tokens"] * turns * W_READ + m["est_tokens"] * W_WRITE * len(res["sessions"]),
+                    f"Slim {m['path']} (~{m['est_tokens']:,} tokens; part of every request in every session) to under 1,500 tokens. Move situational sections into skills or docs read on demand. Edits apply after /clear or a restart."))
+    n, t = idle_summary(res, idle_minutes)
+    if n:
+        out.append((t * W_WRITE, f"{n} cache rebuilds after >{idle_minutes} min idle re-wrote ~{t:,} tokens to the cache. After a long break, start a fresh session (or resume from a short summary you paste in) instead of continuing; /compact on an expired cache reprocesses the full history uncached."))
+    avg_read = S["cache_read"] // turns
+    if avg_read > 80000:
+        out.append((S["cache_read"] * W_READ, f"Average context re-read per turn is ~{avg_read:,} tokens. Cache reads are cheap per token, but long sessions make every turn bigger. Start a fresh session per task and /compact at natural breaks between tasks."))
+    sw = sum(s["model_switches"] for s in res["sessions"].values())
+    if sw:
+        st = sum(s["switch_tokens"] for s in res["sessions"].values())
+        out.append((st * W_WRITE, f"{sw} mid-session model switches; each makes the next request re-read the whole history uncached (~{st:,} tokens). Pick the model at the start of a session."))
     starts = [c for p in projs.values() for c in p["first_ctx"]]
     if starts:
         avg = sum(starts) // len(starts)
         if avg > 20000:
-            out.append((avg * len(starts), f"Average first-turn context is {avg:,} tokens. Run /context in a new session and disable unused MCP servers, skills and plugins for projects that don't need them."))
-    idle = sum(s.get("idle_rewrite_tokens", 0) for s in res["sessions"].values())
-    if idle:
-        n = sum(s["cache_misses_idle"] for s in res["sessions"].values())
-        out.append((idle, f"{n} cache rebuilds after >{CACHE_TTL_MIN} min idle cost ~{idle:,} cache-write tokens. After a long break, /clear or /compact before continuing instead of resuming a huge context."))
+            out.append((avg * len(starts) * W_WRITE, f"Average first-turn context is {avg:,} tokens. Run /context in a new session to see what loads (CLAUDE.md, skills, MCP tools) and trim what this project doesn't need."))
     subt = total(S, "sub_")
     if subt / grand > 0.3:
-        out.append((subt, f"Subagents used {subt/grand:.0%} of tokens. Each subagent starts its own context; reserve them for broad searches and give them narrow prompts."))
-    big_tools = [t for t in res["tool_outputs"] if t["est_tokens"] > 5000]
-    if big_tools:
-        tt = sum(t["est_tokens"] for t in big_tools)
-        out.append((tt * 3, f"{len(big_tools)} tool outputs over 5k tokens (~{tt:,} total) stayed in context. Limit file reads with offsets, pipe command output through head/grep, and avoid dumping logs."))
-    if S["turns"] and S["cache_read"] / max(1, S["turns"]) > 80000:
-        out.append((S["cache_read"], f"Average cache read per turn is {S['cache_read']//S['turns']:,} tokens: sessions run long. Start fresh sessions per task and /compact earlier."))
+        out.append((S["sub_cache_write"] * W_WRITE + S["sub_cache_read"] * W_READ + S["sub_input"] + S["sub_output"] * 5,
+                    f"Subagents account for {subt/grand:.0%} of recorded tokens. Each starts its own context; use them for broad searches with narrow prompts."))
+    big = [x for x in res["tool_outputs"] if x["est_tokens"] > 5000]
+    if big:
+        tt = sum(x["est_tokens"] for x in big)
+        out.append((tt * W_WRITE, f"{len(big)} tool outputs over 5k tokens (~{tt:,} total, estimated) entered the context. Read files with offsets/limits and pipe command output through head or grep."))
     out.sort(key=lambda x: -x[0])
     return [t for _, t in out]

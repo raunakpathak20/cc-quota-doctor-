@@ -6,10 +6,10 @@ def rec(sid, cwd, ts, typ, message, **kw):
     return {"type": typ, "sessionId": sid, "cwd": cwd, "uuid": str(uuid.uuid4()),
             "timestamp": ts.isoformat().replace("+00:00", "Z"), "message": message, **kw}
 
-def asst(i, inp, out, cw, cr, tool=None):
+def asst(i, inp, out, cw, cr, tool=None, model="claude-sonnet-4-5"):
     content = [{"type": "text", "text": "ok"}]
     if tool: content.append({"type": "tool_use", "id": tool, "name": "Bash", "input": {"command": "cat big.log"}})
-    return {"id": f"msg_{i}", "role": "assistant", "model": "claude-sonnet-4-5", "content": content,
+    return {"id": f"msg_{i}", "role": "assistant", "model": model, "content": content,
             "usage": {"input_tokens": inp, "output_tokens": out, "cache_creation_input_tokens": cw, "cache_read_input_tokens": cr}}
 
 def make(root, home):
@@ -29,6 +29,8 @@ def make(root, home):
     L.append(rec(sa, proj_a, t0 + timedelta(seconds=30), "assistant", asst(2, 5, 300, 30000, 45000), requestId="r2"))
     L.append(rec(sa, proj_a, t0 + timedelta(minutes=40), "assistant", asst(3, 5, 200, 76000, 0), requestId="r3"))  # idle rebuild
     L.append(rec(sa, proj_a, t0 + timedelta(minutes=41), "assistant", asst(4, 5, 900, 2000, 60000), requestId="r4", isSidechain=True))
+    # 3h later, different model: counts as >60-min idle rebuild AND a model switch
+    L.append(rec(sa, proj_a, t0 + timedelta(hours=4), "assistant", asst(7, 5, 100, 50000, 0, model="claude-opus-4-1"), requestId="r7"))
     L.append({"type": "system", "subtype": "compact_boundary", "sessionId": sa, "timestamp": (t0 + timedelta(minutes=50)).isoformat()})
     with open(os.path.join(d, sa + ".jsonl"), "w") as f:
         f.write("\n".join(json.dumps(x) for x in L) + "\nnot json garbage\n")
