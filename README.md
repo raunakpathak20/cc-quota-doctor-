@@ -39,7 +39,21 @@ On Windows, the default `~` resolves to `%USERPROFILE%`.
 - the **top 3 fixes**, ranked by API-price-weighted tokens (cache reads count 0.1x, cache writes 1.25x). This weighting is only for ranking; it is not how plan limits are calculated
 
 ## Sample output
-The screenshot above comes from the synthetic test data in `tests/make_sample.py`. Real-run numbers: [NEW NUMBERS]
+The screenshot above is a real run on one developer's history, anonymized and rounded, with project names and paths removed. Here's where the tokens went:
+
+| | |
+|---|---|
+| Sessions | 208 |
+| Longest session | 9,849 turns, 68 compactions |
+| Cache rebuilds after > 60 min away | 280, ~81.6M cache-write tokens |
+| Cache rebuilds after > 5 min away (only matters on the 5-min TTL) | 417, ~112.8M |
+| Mid-session model switches | 37, ~9.07M tokens re-read uncached |
+| Average context re-read per turn | ~374k tokens |
+| Output / cache write / cache read | 24.6M / 260M / 12.5B |
+| Subagents | 24% of raw tokens |
+| Largest CLAUDE.md | ~3k tokens |
+
+Cache reads are 98% of the *raw* tokens here. That isn't 98% of the quota: cache reads are cheap per token, and Anthropic doesn't publish how each token type counts against plan limits.
 
 ## Honest limits
 - **It does not bypass, reset or raise any limit.** It only shows where tokens go.
