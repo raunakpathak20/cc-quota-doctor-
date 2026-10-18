@@ -9,11 +9,11 @@ Usage counters tell you *how much* you used. `cc-quota-doctor` tells you *where 
 ## Install
 Requires Python 3.9+ (Windows, macOS, Linux).
 ```
-pip install git+https://github.com/raunakpathak20/cc-quota-doctor.git
+pip install git+https://github.com/raunakpathak20/cc-quota-doctor-.git
 ```
 Or without installing:
 ```
-git clone https://github.com/raunakpathak20/cc-quota-doctor.git
+git clone https://github.com/raunakpathak20/cc-quota-doctor-.git
 cd cc-quota-doctor
 python -m cc_quota_doctor
 ```
