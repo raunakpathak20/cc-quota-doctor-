@@ -59,6 +59,9 @@ def main(argv=None):
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--idle-minutes", type=int, default=DEFAULT_IDLE_MIN,
                     help="idle gap treated as a cache expiry (default 60 = subscription TTL; use 5 for API key/usage credits)")
+    ap.add_argument("--share", action="store_true",
+                    help="print a redacted report (numbers only: no paths, project names, prompts or tool contents) that is safe to send")
+    ap.add_argument("--out", help="write the report to this file (UTF-8) instead of stdout")
     ap.add_argument("--version", action="version", version=__version__)
     a = ap.parse_args(argv)
     for st in (sys.stdout, sys.stderr):
@@ -67,13 +70,30 @@ def main(argv=None):
     if not os.path.isdir(os.path.expanduser(a.projects_dir)):
         print(f"No transcripts at {a.projects_dir}", file=sys.stderr); return 1
     res, projs, mds, fx = build_report(a.projects_dir, a.home, a.top, idle_minutes=a.idle_minutes)
+    if a.share:
+        from .share import build_share, dumps, ShareLeak
+        try:
+            text = dumps(build_share(res, projs, a.home, a.top, a.idle_minutes))
+        except ShareLeak as e:
+            print(f"Share report NOT written: self-check found {e} in the output. Nothing was printed. "
+                  "Please open an issue (without pasting the report).", file=sys.stderr)
+            return 3
+        return _emit(text, a.out, share=True)
     if a.json:
-        print(json.dumps({"sessions": {k: {**v, "first_ts": str(v["first_ts"]), "last_ts": str(v["last_ts"])} for k, v in res["sessions"].items()},
+        return _emit(json.dumps({"sessions": {k: {**v, "first_ts": str(v["first_ts"]), "last_ts": str(v["last_ts"])} for k, v in res["sessions"].items()},
                           "claude_md": mds, "fixes": fx, "idle_minutes": a.idle_minutes,
                           "idle_rebuilds": dict(zip(["count", "cache_write_tokens"], idle_summary(res, a.idle_minutes))),
-                          "idle_rebuilds_5min": dict(zip(["count", "cache_write_tokens"], idle_summary(res, SHORT_TTL_MIN)))}, default=str, indent=2))
+                          "idle_rebuilds_5min": dict(zip(["count", "cache_write_tokens"], idle_summary(res, SHORT_TTL_MIN)))}, default=str, indent=2), a.out)
+    return _emit(render_text(res, projs, mds, fx, a.top, a.idle_minutes), a.out)
+
+def _emit(text, out=None, share=False):
+    if out:
+        with open(os.path.expanduser(out), "w", encoding="utf-8", newline="\n") as f:
+            f.write(text + "\n")
+        if share:
+            print(f"Redacted share report written to {out}. Open it and check it before sending.", file=sys.stderr)
     else:
-        print(render_text(res, projs, mds, fx, a.top, a.idle_minutes))
+        print(text)
     return 0
 
 if __name__ == "__main__":
